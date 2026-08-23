@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import katex from 'katex'
@@ -188,6 +188,55 @@ export default function App() {
   const [streaming, setStreaming] = useState(false)
   const [phase, setPhase] = useState('')
   const [preview, setPreview] = useState(null) // { name, type, url }
+  const [dragActive, setDragActive] = useState(false)
+  const [thumbs, setThumbs] = useState({})
+  const fileInputRef = useRef(null)
+
+  // Shared add pipeline: merge, dedupe, modality filter, 10-file cap.
+  const MAX_FILES = 10
+  function addFiles(incoming) {
+    setFiles((prev) => {
+      const merged = [...prev]
+      for (const f of incoming) {
+        if (merged.length >= MAX_FILES) break
+        if (!fileMatchesModalities(f, inputModsRef.current)) continue
+        if (!merged.some((x) => x.name === f.name && x.size === f.size)) merged.push(f)
+      }
+      return merged
+    })
+  }
+
+  // Thumbnail object-URLs for image files; revoked when the list changes.
+  useEffect(() => {
+    const created = {}
+    for (const [index, file] of files.entries()) {
+      if (file.type?.startsWith('image/')) created[index] = URL.createObjectURL(file)
+    }
+    setThumbs(created)
+    return () => { for (const url of Object.values(created)) URL.revokeObjectURL(url) }
+  }, [files])
+
+  // Small icon for non-image files in the list.
+  function fileIconFor(file) {
+    const t = file.type || ''
+    if (t.startsWith('video/')) return '▶'
+    if (t.startsWith('audio/')) return '♪'
+    if (t === 'application/pdf') return 'PDF'
+    return 'DOC'
+  }
+
+  // Clipboard paste: attach image files copied anywhere (Ctrl+V).
+  useEffect(() => {
+    const onPaste = (e) => {
+      const items = Array.from(e.clipboardData?.files ?? [])
+      if (items.length === 0) return
+      e.preventDefault()
+      addFiles(items)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Open a file in the in-app preview (images inline, PDFs in an iframe).
   function openPreview(file) {
@@ -198,6 +247,43 @@ export default function App() {
   function closePreview() {
     if (preview) URL.revokeObjectURL(preview.url)
     setPreview(null)
+  }
+
+  // Trigger a client-side download of a text blob.
+  function downloadBlob(content, mime, extension) {
+    const blob = new Blob([content], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `response-${new Date().toISOString().slice(0, 10)}.${extension}`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  // Open a print-friendly window with the rendered response; the user saves as PDF.
+  function downloadPdf() {
+    const source = document.querySelector('.result-card .response')
+    if (!source) return
+    const win = window.open('', '_blank', 'width=820,height=900')
+    if (!win) {
+      setError('Popup blocked — allow popups to export as PDF.')
+      return
+    }
+    const styles = [...document.querySelectorAll('style, link[rel="stylesheet"]')]
+      .map((node) => node.outerHTML)
+      .join('\n')
+    win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Response</title>${styles}
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px; color: #1d1d1f; background: #fff; }
+        .print-header { font-size: 12px; color: #6e6e73; border-bottom: 1px solid #e5e5ea; padding-bottom: 10px; margin-bottom: 20px; }
+        @media print { .print-note { display: none; } }
+        .print-note { margin-top: 28px; font-size: 12px; color: #6e6e73; }
+      </style></head><body>
+      <div class="print-header">OpenRouter Analyzer${meta ? ` · ${meta.model}${meta.usage ? ` · ${meta.usage.total_tokens ?? '?'} tokens` : ''}` : ''} · ${new Date().toLocaleString()}</div>
+      ${source.innerHTML}
+      <div class="print-note">Press Ctrl/Cmd+P and choose “Save as PDF”.</div>
+      </body></html>`)
+    win.document.close()
   }
 
   useEffect(() => {
@@ -240,6 +326,10 @@ export default function App() {
   const outputMods = selectedModelInfo?.outputModalities ?? ['text']
   const acceptsImage = inputMods.includes('image')
   const acceptsPdf = inputMods.includes('file') || inputMods.includes('pdf')
+
+  // Keep a ref of current modalities for use inside addFiles (defined above).
+  const inputModsRef = useRef(inputMods)
+  useEffect(() => { inputModsRef.current = inputMods }, [inputMods])
 
   const MODALITY_ICONS = {
     text: (
@@ -572,39 +662,49 @@ export default function App() {
         </div>
 
         <div className="row">
-          <label className="field">
+          <div className="field">
             <span>
               {uploadAccept
                 ? `Upload (${uploadLabel})`
                 : 'Upload — selected model accepts text only'}
             </span>
-            <input
-              type="file"
-              accept={uploadAccept || undefined}
-              multiple
-              onChange={(e) => {
-                const incoming = Array.from(e.target.files ?? [])
-                setFiles((prev) => {
-                  // Merge instead of overwrite; drop duplicates; cap at 10 files.
-                  const MAX_FILES = 10
-                  const merged = [...prev]
-                  for (const f of incoming) {
-                    if (merged.length >= MAX_FILES) break
-                    if (!fileMatchesModalities(f, inputMods)) continue
-                    if (!merged.some((x) => x.name === f.name && x.size === f.size)) merged.push(f)
-                  }
-                  return merged
-                })
-                e.target.value = '' // allow re-adding the same file later
-              }}
-            />
-          </label>
+            <div
+              className={`dropzone ${dragActive ? 'drag-active' : ''}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`Add files by browsing, pasting, or dragging. Accepted: ${uploadLabel || 'none'}`}
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click() } }}
+              onDragOver={(e) => { e.preventDefault(); setDragActive(true) }}
+              onDragLeave={() => setDragActive(false)}
+              onDrop={(e) => { e.preventDefault(); setDragActive(false); addFiles(Array.from(e.dataTransfer.files ?? [])) }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={uploadAccept || undefined}
+                multiple
+                hidden
+                onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }}
+              />
+              <span className="dropzone-plus" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
+              </span>
+              <span className="dropzone-text">
+                <strong>Click to browse</strong>, drag &amp; drop or paste
+              </span>
+              <span className="dropzone-hint">{files.length}/10 files</span>
+            </div>
+          </div>
         </div>
 
         {files.length > 0 && (
           <ul className="file-list">
             {files.map((file, index) => (
               <li key={`${file.name}-${index}`} className="file-item">
+                {file.type?.startsWith('image/') && thumbs[index]
+                  ? <img className="file-thumb" src={thumbs[index]} alt="" aria-hidden="true" />
+                  : <span className="file-thumb file-thumb-generic" aria-hidden="true">{fileIconFor(file)}</span>}
                 <button
                   type="button"
                   className="file-open"
@@ -681,12 +781,30 @@ export default function App() {
 
       {(result || meta) && (
         <section className="card result-card" aria-live="polite">
-          {meta && (
-            <p className="meta">
-              <strong>{meta.model}</strong>
-              {meta.usage && ` · ${meta.usage.total_tokens ?? '?'} tokens`}
-            </p>
-          )}
+          <div className="result-toolbar">
+            {meta && (
+              <p className="meta">
+                <strong>{meta.model}</strong>
+                {meta.usage && ` · ${meta.usage.total_tokens ?? '?'} tokens`}
+              </p>
+            )}
+            {result && (
+              <div className="download-group" role="group" aria-label="Download response">
+                <button type="button" className="dl-btn" onClick={() => downloadBlob(result, 'text/markdown;charset=utf-8', 'md')} title="Download as Markdown">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 4v8h12V4z" fill="none" stroke="currentColor" strokeWidth="1.3"/><path d="M4.2 10V6.5L6 8.8l1.8-2.3V10M10 6.5V10m0 0l-1.4-1.4M10 10l1.4-1.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  Markdown
+                </button>
+                <button type="button" className="dl-btn" onClick={() => downloadBlob(result.replace(/^#{1,6}\s*/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/[*_`]/g, ''), 'text/plain;charset=utf-8', 'txt')} title="Download as plain text">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 2h5l3 3v9H4z" fill="none" stroke="currentColor" strokeWidth="1.3"/><path d="M6 8h4M6 10.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+                  Text
+                </button>
+                <button type="button" className="dl-btn" onClick={downloadPdf} title="Export as PDF (via print dialog)">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2v8m0 0L5.5 7.5M8 10l2.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><path d="M3 12.5h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+                  PDF
+                </button>
+              </div>
+            )}
+          </div>
           {result && <ResponseBlock markdown={result} />}
         </section>
       )}

@@ -220,6 +220,87 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
   text-decoration: underline;
 }
 
+/* Upload dropzone */
+.dropzone {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 18px;
+  border: 1.5px dashed rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dropzone:hover,
+.dropzone:focus-visible,
+.dropzone.drag-active {
+  border-color: var(--accent);
+  background: rgba(0, 113, 227, 0.05);
+}
+
+.dropzone.drag-active { border-style: solid; }
+
+.dropzone-plus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(0, 113, 227, 0.1);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.dropzone-text {
+  flex: 1;
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.dropzone-text strong { color: var(--text); font-weight: 600; }
+.dropzone-text kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.dropzone-hint {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.05);
+  padding: 3px 9px;
+  border-radius: 12px;
+}
+
+.file-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.file-thumb-generic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
 /* File preview modal */
 .preview-overlay {
   position: fixed;
@@ -336,9 +417,45 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
 }
 
 .result-card .meta {
-  margin: 0 0 16px;
+  margin: 0;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.download-group {
+  display: flex;
+  gap: 6px;
+}
+
+.dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.dl-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(0, 113, 227, 0.06);
 }
 
 .response h3 {
