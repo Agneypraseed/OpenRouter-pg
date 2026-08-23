@@ -33,16 +33,42 @@ function buildContent(text, files) {
   const parts = []
   if (text.trim()) parts.push({ type: 'text', text })
   for (const file of files) {
-    if (file.type === 'application/pdf') {
-      parts.push({ type: 'file', file: { filename: file.name, file_data: `data:${file.type};base64,${file.base64}` } })
-    } else if (file.type.startsWith('image/')) {
+    if (file.type.startsWith('image/')) {
       parts.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${file.base64}` } })
+    } else if (file.type.startsWith('audio/')) {
+      parts.push({ type: 'input_audio', input_audio: { data: file.base64, format: file.type.split('/')[1] } })
+    } else if (file.type.startsWith('video/')) {
+      parts.push({ type: 'video_url', video_url: { url: `data:${file.type};base64,${file.base64}` } })
+    } else {
+      // PDFs and any other documents go through the generic file part.
+      parts.push({ type: 'file', file: { filename: file.name, file_data: `data:${file.type};base64,${file.base64}` } })
     }
   }
   return parts
 }
 
 const URL_PATTERN = /@url:`([^`]+)`|(https?:\/\/[^\s)`]+)/g
+
+// Map a browser MIME type to the OpenRouter modality name it belongs to.
+function fileModality(file) {
+  const t = file.type || ''
+  if (t.startsWith('image/')) return 'image'
+  if (t.startsWith('video/')) return 'video'
+  if (t.startsWith('audio/')) return 'audio'
+  if (t === 'application/pdf') return 'file'
+  if (t.startsWith('text/') || t === 'application/json' || t === 'application/xml') return 'file'
+  return null
+}
+
+// True if the file's type is among the model's accepted input modalities.
+function fileMatchesModalities(file, inputMods) {
+  const mod = fileModality(file)
+  if (!mod) return false
+  if (inputMods.includes(mod)) return true
+  // 'file' modality also covers pdf-specific declarations.
+  if (mod === 'file' && inputMods.includes('pdf')) return true
+  return false
+}
 
 // Extract every URL referenced in the prompt (@url:`...` syntax or bare links).
 function extractUrls(text) {
@@ -161,6 +187,26 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0)
   const [streaming, setStreaming] = useState(false)
   const [phase, setPhase] = useState('')
+  const [preview, setPreview] = useState(null) // { name, type, url }
+
+  // Open a file in the in-app preview (images inline, PDFs in an iframe).
+  function openPreview(file) {
+    setPreview({ name: file.name, type: file.type, url: URL.createObjectURL(file) })
+  }
+
+  // Revoke blob URLs when the preview closes so memory is freed.
+  function closePreview() {
+    if (preview) URL.revokeObjectURL(preview.url)
+    setPreview(null)
+  }
+
+  useEffect(() => {
+    if (!preview) return
+    const onKey = (e) => { if (e.key === 'Escape') closePreview() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview])
 
   // Elapsed-time counter while a request is in flight.
   useEffect(() => {
@@ -176,12 +222,62 @@ export default function App() {
       .then((data) => {
         if (!Array.isArray(data?.data)) return
         const models = data.data
-          .map((m) => ({ id: m.id, name: m.name ?? m.id }))
+          .map((m) => ({
+            id: m.id,
+            name: m.name ?? m.id,
+            inputModalities: m.architecture?.input_modalities ?? ['text'],
+            outputModalities: m.architecture?.output_modalities ?? ['text'],
+          }))
           .sort((a, b) => a.name.localeCompare(b.name))
         if (models.length > 0) setAllModels(models)
       })
       .catch(() => {})
   }, [])
+
+  // Modality info for the selected model (falls back to Ox Alpha's known profile).
+  const selectedModelInfo = allModels.find((m) => m.id === model)
+  const inputMods = selectedModelInfo?.inputModalities ?? ['text', 'image', 'video']
+  const outputMods = selectedModelInfo?.outputModalities ?? ['text']
+  const acceptsImage = inputMods.includes('image')
+  const acceptsPdf = inputMods.includes('file') || inputMods.includes('pdf')
+
+  const MODALITY_ICONS = {
+    text: (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 3.5h10M8 3.5v9M5.5 12.5h5" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round"/></svg>
+    ),
+    image: (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4" fill="none"/><circle cx="6" cy="6.5" r="1.3" fill="currentColor"/><path d="M3 11.5l3.2-3 2.3 2 2-1.8 2.5 2.3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinejoin="round"/></svg>
+    ),
+    video: (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="1.5" y="4" width="9" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.4" fill="none"/><path d="M10.5 8l4-2.5v5z" fill="currentColor"/></svg>
+    ),
+    audio: (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 8h2l2-3.5v7L4 8H2zm7-2.5a3 3 0 010 5m2-7a5.5 5.5 0 010 9" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+    ),
+    file: (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 2h5l3 3v9H4z" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinejoin="round"/><path d="M9 2v3h3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinejoin="round"/></svg>
+    ),
+    pdf: null, // rendered as 'file'
+  }
+  const modalityIcon = (mod) => MODALITY_ICONS[mod] ?? MODALITY_ICONS.file
+
+  // Which file types the picker accepts, derived from the model's input modalities.
+  const MODALITY_ACCEPT = {
+    text: null, // not a file type
+    image: 'image/*',
+    video: 'video/*',
+    audio: 'audio/*',
+    file: '.pdf,.doc,.docx,.txt,.csv,.json,.xml,.md',
+    pdf: '.pdf',
+  }
+  const uploadAccept = inputMods
+    .map((mod) => MODALITY_ACCEPT[mod])
+    .filter(Boolean)
+    .join(',') || ''
+  const uploadLabel = inputMods
+    .filter((mod) => MODALITY_ACCEPT[mod])
+    .map((mod) => ({ image: 'images', video: 'videos', audio: 'audio', file: 'documents', pdf: 'PDFs' }[mod] ?? mod))
+    .join(', ')
 
 
   async function handleSubmit(event) {
@@ -453,13 +549,54 @@ export default function App() {
         </div>
 
         <div className="row">
+          <div className="field">
+            <span>Modalities</span>
+            <div className="modality-panel" aria-label="Model input and output modalities">
+              <div className="modality-group" title={`Accepted inputs: ${inputMods.join(', ')}`}>
+                {inputMods.map((mod) => (
+                  <span key={mod} className={`modality-badge ${mod}`} title={mod}>
+                    {modalityIcon(mod)}
+                  </span>
+                ))}
+              </div>
+              <svg className="modality-arrow" viewBox="0 0 20 10" width="20" height="10" aria-hidden="true"><path d="M1 5h16m0 0l-3.5-3.5M17 5l-3.5 3.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round"/></svg>
+              <div className="modality-group" title={`Produces: ${outputMods.join(', ')}`}>
+                {outputMods.map((mod) => (
+                  <span key={mod} className={`modality-badge ${mod}`} title={mod}>
+                    {modalityIcon(mod)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="row">
           <label className="field">
-            <span>Upload (PDF or images)</span>
+            <span>
+              {uploadAccept
+                ? `Upload (${uploadLabel})`
+                : 'Upload — selected model accepts text only'}
+            </span>
             <input
               type="file"
-              accept=".pdf,image/*"
+              accept={uploadAccept || undefined}
               multiple
-              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => {
+                const incoming = Array.from(e.target.files ?? [])
+                setFiles((prev) => {
+                  // Merge instead of overwrite; drop duplicates; cap at 10 files.
+                  const MAX_FILES = 10
+                  const merged = [...prev]
+                  for (const f of incoming) {
+                    if (merged.length >= MAX_FILES) break
+                    if (!fileMatchesModalities(f, inputMods)) continue
+                    if (!merged.some((x) => x.name === f.name && x.size === f.size)) merged.push(f)
+                  }
+                  return merged
+                })
+                e.target.value = '' // allow re-adding the same file later
+              }}
             />
           </label>
         </div>
@@ -467,8 +604,15 @@ export default function App() {
         {files.length > 0 && (
           <ul className="file-list">
             {files.map((file, index) => (
-              <li key={`${file.name}-${index}`}>
-                <span>{file.name} · {(file.size / 1024).toFixed(0)} KB</span>
+              <li key={`${file.name}-${index}`} className="file-item">
+                <button
+                  type="button"
+                  className="file-open"
+                  onClick={() => openPreview(file)}
+                  title={`Preview ${file.name}`}
+                >
+                  {file.name} · {(file.size / 1024).toFixed(0)} KB
+                </button>
                 <button type="button" aria-label={`Remove ${file.name}`} onClick={() => removeFile(index)}>✕</button>
               </li>
             ))}
@@ -554,6 +698,25 @@ export default function App() {
           <h3 className="dev-title">Response</h3>
           <pre className="dev-json" tabIndex={0}>{rawResponse || '— no response yet —'}</pre>
         </section>
+      )}
+
+      {preview && (
+        <div className="preview-overlay" onClick={closePreview} role="dialog" aria-modal="true" aria-label={`Preview of ${preview.name}`}>
+          <div className="preview-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="preview-header">
+              <span className="preview-name" title={preview.name}>{preview.name}</span>
+              <div className="preview-actions">
+                <a className="preview-newtab" href={preview.url} target="_blank" rel="noreferrer">Open in new tab</a>
+                <button type="button" className="preview-close" aria-label="Close preview" onClick={closePreview}>✕</button>
+              </div>
+            </div>
+            {preview.type.startsWith('image/') ? (
+              <img className="preview-image" src={preview.url} alt={preview.name} />
+            ) : (
+              <iframe className="preview-frame" src={preview.url} title={preview.name} />
+            )}
+          </div>
+        </div>
       )}
 
       <footer className="footer">
