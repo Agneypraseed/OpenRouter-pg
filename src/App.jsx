@@ -42,6 +42,25 @@ function buildContent(text, files) {
   return parts
 }
 
+const URL_PATTERN = /@url:`([^`]+)`|(https?:\/\/[^\s)`]+)/g
+
+// Extract every URL referenced in the prompt (@url:`...` syntax or bare links).
+function extractUrls(text) {
+  const urls = []
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const url = (match[1] ?? match[2]).replace(/[.,;]+$/, '')
+    if (!urls.includes(url)) urls.push(url)
+  }
+  return urls
+}
+
+// Fetch a page as clean markdown via r.jina.ai (CORS-enabled reader proxy).
+async function fetchPageMarkdown(url, signal) {
+  const response = await fetch(`https://r.jina.ai/${url}`, { signal })
+  if (!response.ok) throw new Error(`Failed to fetch ${url} (${response.status})`)
+  return response.text()
+}
+
 function renderMathInText(text) {
   if (!text || !text.includes('$')) return text
   const parts = []
@@ -141,6 +160,7 @@ export default function App() {
   const [rawResponse, setRawResponse] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [streaming, setStreaming] = useState(false)
+  const [phase, setPhase] = useState('')
 
   // Elapsed-time counter while a request is in flight.
   useEffect(() => {
@@ -185,11 +205,41 @@ export default function App() {
         })),
       )
 
+      // Browse any links in the prompt and pull their content in as context.
+      const urls = extractUrls(prompt)
+      const pageContexts = []
+      if (urls.length > 0) {
+        setPhase(`Reading ${urls.length === 1 ? 'link' : `${urls.length} links`}…`)
+        const fetchController = new AbortController()
+        const fetchTimeout = setTimeout(() => fetchController.abort(), 30000)
+        try {
+          const results = await Promise.allSettled(urls.map((url) => fetchPageMarkdown(url, fetchController.signal)))
+          for (const [index, result] of results.entries()) {
+            if (result.status === 'fulfilled') {
+              // Cap each page so one huge site can't blow the context window.
+              pageContexts.push({ url: urls[index], markdown: result.value.slice(0, 60000) })
+            } else {
+              const reason = result.reason?.name === 'AbortError' ? 'timed out' : result.reason?.message
+              pageContexts.push({ url: urls[index], markdown: `Failed to fetch: ${reason}` })
+            }
+          }
+        } finally {
+          clearTimeout(fetchTimeout)
+        }
+        setPhase('')
+      }
+
+      const userText = pageContexts.length > 0
+        ? `${prompt}\n\n---\nReferenced page content:\n\n${pageContexts
+            .map(({ url, markdown }) => `### ${url}\n\n${markdown}`)
+            .join('\n\n---\n\n')}`
+        : prompt
+
       const requestBody = {
         model,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: buildContent(prompt, contentParts) },
+          { role: 'user', content: buildContent(userText, contentParts) },
         ],
         ...(reasoningEffort !== 'none' && { reasoning_effort: reasoningEffort }),
       }
@@ -477,9 +527,11 @@ export default function App() {
       {loading && (
         <div className="card muted" role="status" aria-live="polite">
           <span className="spinner" aria-hidden="true" />
-          {streaming
-            ? <>Receiving response… <strong className="timer">{elapsed}s</strong></>
-            : <>Waiting for the model… <strong className="timer">{elapsed}s</strong>{elapsed >= 30 && ' (still working — high reasoning can take a while)'}</>}
+          {phase
+            ? <>{phase} <strong className="timer">{elapsed}s</strong></>
+            : streaming
+              ? <>Receiving response… <strong className="timer">{elapsed}s</strong></>
+              : <>Waiting for the model… <strong className="timer">{elapsed}s</strong>{elapsed >= 30 && ' (still working — high reasoning can take a while)'}</>}
         </div>
       )}
 
