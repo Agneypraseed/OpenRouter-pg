@@ -586,6 +586,76 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
 .chat-composer .chat-send:hover:not(:disabled) { background: var(--accent-hover); }
 .chat-composer .chat-send:disabled { opacity: 0.4; cursor: default; }
 
+/* Paperclip attach button in the chat composer */
+.chat-attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.chat-attach:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.chat-attach:disabled { opacity: 0.4; cursor: default; }
+
+/* Attached-file chips inside the chat composer */
+.composer-files {
+  flex-basis: 100%;
+  flex-direction: row;
+  flex-wrap: wrap;
+  margin: 0 0 4px;
+}
+
+.composer-files .file-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  padding: 4px 8px;
+  background: rgba(0, 113, 227, 0.06);
+  border: 1px solid rgba(0, 113, 227, 0.15);
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.composer-files .file-thumb-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.composer-files .file-thumb-btn img {
+  height: 32px;
+  border-radius: 6px;
+  display: block;
+}
+
+.composer-files .file-remove {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+}
+
+.composer-files .file-remove:hover { color: #ff3b30; }
+
 .composer-hint {
   margin: 10px 0 0;
   font-size: 11.5px;

@@ -270,6 +270,7 @@ export default function App() {
   const [thumbs, setThumbs] = useState({})
   const [runHtml, setRunHtml] = useState(null) // { name, code } — live HTML preview modal
   const fileInputRef = useRef(null)
+  const composerFileRef = useRef(null)
   const currentCleanupRef = useRef(null) // clears the in-flight request's timers on unmount
   const threadEndRef = useRef(null)
 
@@ -1010,6 +1011,38 @@ export default function App() {
             className="chat-composer"
             onSubmit={(e) => { e.preventDefault(); handleSubmit(e) }}
           >
+            {files.length > 0 && (
+              <ul className="file-list composer-files">
+                {files.map((f, i) => (
+                  <li key={`${f.name}-${f.size}-${i}`} className="file-chip">
+                    <button type="button" className="file-thumb-btn" onClick={() => openPreview(f)} title={`Preview ${f.name}`}>
+                      {thumbs[`${f.name}-${f.size}`]
+                        ? <img src={thumbs[`${f.name}-${f.size}`]} alt="" />
+                        : <span className="file-chip-name">{f.name}</span>}
+                    </button>
+                    <button type="button" className="file-remove" aria-label={`Remove ${f.name}`} onClick={() => removeFile(i)}>✕</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <input
+              ref={composerFileRef}
+              type="file"
+              multiple
+              hidden
+              accept={finalAccept || undefined}
+              onChange={(e) => { addFiles([...e.target.files]); e.target.value = '' }}
+            />
+            <button
+              type="button"
+              className="chat-attach"
+              onClick={() => composerFileRef.current?.click()}
+              disabled={loading}
+              title={`Attach files${uploadLabel ? ` (${uploadLabel})` : ''}`}
+              aria-label="Attach files"
+            >
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M14 5.5l-7.2 7.2a2.5 2.5 0 003.5 3.5l7.6-7.6a4 4 0 10-5.7-5.7L4.6 10.5a5.5 5.5 0 107.8 7.8l6.6-6.6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>
+            </button>
             <textarea
               rows={2}
               value={prompt}
