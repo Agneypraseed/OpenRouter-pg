@@ -150,6 +150,35 @@ function renderKatex(tex, displayMode, key) {
   return <span key={key} dangerouslySetInnerHTML={{ __html: html }} />
 }
 
+// Sandboxed iframes (no allow-same-origin) throw SecurityError when a page
+// touches localStorage/sessionStorage. Inject an in-memory shim as the very
+// first script so such pages run without weakening the sandbox.
+function withStorageShim(code) {
+  const shim = `<script>(function(){
+    var mem = {};
+    function makeStore(){ var s = {}; Object.defineProperty(s, 'length', { get: function(){ return Object.keys(s).length; } }); return s; }
+    function patch(name){
+      try { window[name].getItem } catch (e) {
+        var store = makeStore();
+        store.getItem = function(k){ return Object.prototype.hasOwnProperty.call(mem, name + k) ? mem[name + k] : null; };
+        store.setItem = function(k, v){ mem[name + k] = String(v); };
+        store.removeItem = function(k){ delete mem[name + k]; };
+        store.clear = function(){ Object.keys(mem).forEach(function(k){ if (k.indexOf(name) === 0) delete mem[k]; }); };
+        store.key = function(i){ var ks = Object.keys(mem).filter(function(k){ return k.indexOf(name) === 0; }); return i < ks.length ? ks[i].slice(name.length) : null; };
+        try { Object.defineProperty(window, name, { value: store, configurable: true }); } catch (e2) {}
+      }
+    }
+    patch('localStorage'); patch('sessionStorage');
+  })();</script>`
+  if (/<head[^>]*>/i.test(code)) {
+    return code.replace(/<head([^>]*)>/i, (m) => m + shim)
+  }
+  if (/<html[^>]*>/i.test(code)) {
+    return code.replace(/<html([^>]*)>/i, (m) => m + shim)
+  }
+  return shim + code
+}
+
 function ResponseBlock({ markdown, onRunHtml }) {
   const containerRef = useRef(null)
   const html = useMemo(() => {
@@ -1076,7 +1105,7 @@ export default function App() {
               className="preview-frame"
               title={runHtml.name}
               sandbox="allow-scripts allow-forms allow-modals allow-popups"
-              srcDoc={runHtml.code}
+              srcDoc={withStorageShim(runHtml.code)}
             />
           </div>
         </div>
