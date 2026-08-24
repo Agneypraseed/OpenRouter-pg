@@ -49,6 +49,26 @@ function buildContent(text, files) {
 
 const URL_PATTERN = /@url:`([^`]+)`|(https?:\/\/[^\s)`]+)/g
 
+// Pull the most specific human-readable message out of an OpenRouter error
+// response. The interesting text often hides in error.metadata.raw.
+function parseProviderError(status, bodyText) {
+  let data = null
+  try { data = JSON.parse(bodyText) } catch {}
+  const err = data?.error ?? {}
+  const raw = err.metadata?.raw
+  const hint = err.metadata?.remedy_hint
+  let message = err.message || `Request failed (${status})`
+  if (raw && raw !== message) message += ` — ${raw}`
+  // Surface the HTTP code for transient classes so users know it's server-side.
+  if (status === 429) message = `Rate limited (429). ${message}`
+  else if (status >= 500) message = `Provider outage (${status}). ${message}`
+  if (hint && status !== 402) message += ` (${hint})`
+  return message
+}
+
+// Transient server-side failures worth an automatic retry.
+const isTransient = (status) => status === 408 || status === 409 || status === 429 || status >= 500
+
 // Map a browser MIME type to the OpenRouter modality name it belongs to.
 function fileModality(file) {
   const t = file.type || ''
@@ -65,8 +85,11 @@ function fileMatchesModalities(file, inputMods) {
   const mod = fileModality(file)
   if (!mod) return false
   if (inputMods.includes(mod)) return true
-  // 'file' modality also covers pdf-specific declarations.
-  if (mod === 'file' && inputMods.includes('pdf')) return true
+  // Documents/PDFs ride on the image pathway at most providers, so allow them
+  // for any model that takes images even when 'file' isn't declared.
+  if (mod === 'file') {
+    return inputMods.includes('file') || inputMods.includes('pdf') || inputMods.includes('image')
+  }
   return false
 }
 
@@ -191,6 +214,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false)
   const [thumbs, setThumbs] = useState({})
   const fileInputRef = useRef(null)
+  const currentCleanupRef = useRef(null) // clears the in-flight request's timers on unmount
 
   // Shared add pipeline: merge, dedupe, modality filter, 10-file cap.
   const MAX_FILES = 10
@@ -360,11 +384,15 @@ export default function App() {
     file: '.pdf,.doc,.docx,.txt,.csv,.json,.xml,.md',
     pdf: '.pdf',
   }
-  const uploadAccept = inputMods
+  // Documents ride on the image pathway, so include them when images are accepted.
+  const effectiveMods = acceptsImage && !inputMods.includes('file') && !inputMods.includes('pdf')
+    ? [...inputMods, 'file']
+    : inputMods
+  const finalAccept = effectiveMods
     .map((mod) => MODALITY_ACCEPT[mod])
     .filter(Boolean)
-    .join(',') || ''
-  const uploadLabel = inputMods
+    .join(',')
+  const uploadLabel = effectiveMods
     .filter((mod) => MODALITY_ACCEPT[mod])
     .map((mod) => ({ image: 'images', video: 'videos', audio: 'audio', file: 'documents', pdf: 'PDFs' }[mod] ?? mod))
     .join(', ')
@@ -431,93 +459,118 @@ export default function App() {
       }
       setRawRequest(JSON.stringify(requestBody, null, 2))
 
-      const controller = new AbortController()
-      // Two-tier timeout: 60s to receive the FIRST byte, 300s total for the
-      // whole response. Streaming keeps tokens flowing so long generations
-      // don't hit the wall as long as the model is actively producing.
       const firstByteTimeoutMs = 60000
       const totalTimeoutMs = 300000
-      let timeoutId = setTimeout(() => controller.abort(), firstByteTimeoutMs)
-      const extendDeadline = () => {
-        clearTimeout(timeoutId)
-        timeoutId = setTimeout(() => controller.abort(), totalTimeoutMs)
-      }
 
       let content = ''
       let usage = null
       let responseModel = null
       try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey.trim()}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ ...requestBody, stream: true }),
-          signal: controller.signal,
-        })
-
-        if (!response.ok) {
-          let message = `Request failed (${response.status})`
-          try {
-            const errData = await response.json()
-            if (errData?.error?.message) message = errData.error.message
-          } catch {}
-          throw new Error(message)
-        }
-
-        extendDeadline()
-        setStreaming(true)
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          extendDeadline()
-          buffer += decoder.decode(value, { stream: true })
-          let newlineIndex
-          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.slice(0, newlineIndex).trim()
-            buffer = buffer.slice(newlineIndex + 1)
-            if (!line.startsWith('data:')) continue
-            const payload = line.slice(5).trim()
-            if (payload === '[DONE]') continue
-            try {
-              const chunk = JSON.parse(payload)
-              if (chunk.model) responseModel = chunk.model
-              if (chunk.usage) usage = chunk.usage
-              const delta = chunk.choices?.[0]?.delta?.content
-              if (delta) {
-                content += delta
-                setResult(content)
-              }
-            } catch {}
+        const MAX_ATTEMPTS = 3
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          if (attempt > 1) {
+            setPhase(`Provider busy — retrying (attempt ${attempt}/${MAX_ATTEMPTS})…`)
+            await new Promise((resolve) => setTimeout(resolve, attempt === 2 ? 3000 : 9000))
           }
-        }
 
-        // Fallback: some providers return a non-streamed body despite stream:true
-        if (!content && !responseModel) {
-          const text = buffer.trim()
-          if (text) {
-            try {
-              const data = JSON.parse(text)
-              content = data.choices?.[0]?.message?.content ?? ''
-              usage = data.usage ?? null
-              responseModel = data.model ?? null
-            } catch {}
+          const controller = new AbortController()
+          // Two-tier timeout: 60s to receive the FIRST byte, 300s total for the
+          // whole response. Streaming keeps tokens flowing so long generations
+          // don't hit the wall as long as the model is actively producing.
+          let timeoutId = setTimeout(() => controller.abort(), firstByteTimeoutMs)
+          const extendDeadline = () => {
+            clearTimeout(timeoutId)
+            timeoutId = setTimeout(() => controller.abort(), totalTimeoutMs)
+          }
+          currentCleanupRef.current = () => clearTimeout(timeoutId)
+
+          try {
+            const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${apiKey.trim()}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ ...requestBody, stream: true }),
+              signal: controller.signal,
+            })
+
+            if (!response.ok) {
+              const bodyText = await response.text()
+              const message = parseProviderError(response.status, bodyText)
+              // Transient server-side failures: retry automatically.
+              if (isTransient(response.status) && attempt < MAX_ATTEMPTS) continue
+              throw Object.assign(new Error(message), { noRetry: true })
+            }
+
+            extendDeadline()
+            setStreaming(true)
+            const reader = response.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              extendDeadline()
+              buffer += decoder.decode(value, { stream: true })
+              let newlineIndex
+              while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                const line = buffer.slice(0, newlineIndex).trim()
+                buffer = buffer.slice(newlineIndex + 1)
+                if (!line.startsWith('data:')) continue
+                const payload = line.slice(5).trim()
+                if (payload === '[DONE]') continue
+                try {
+                  const chunk = JSON.parse(payload)
+                  if (chunk.model) responseModel = chunk.model
+                  if (chunk.usage) usage = chunk.usage
+                  const delta = chunk.choices?.[0]?.delta?.content
+                  if (delta) {
+                    content += delta
+                    setResult(content)
+                  }
+                  // Mid-stream provider errors arrive as SSE events too.
+                  if (chunk.error) {
+                    const msg = parseProviderError(chunk.error.code ?? 500, JSON.stringify({ error: chunk.error }))
+                    throw Object.assign(new Error(msg), { noRetry: true })
+                  }
+                } catch (e) {
+                  if (e?.noRetry) throw e
+                }
+              }
+            }
+
+            // Fallback: some providers return a non-streamed body despite stream:true
+            if (!content && !responseModel) {
+              const text = buffer.trim()
+              if (text) {
+                try {
+                  const data = JSON.parse(text)
+                  content = data.choices?.[0]?.message?.content ?? ''
+                  usage = data.usage ?? null
+                  responseModel = data.model ?? null
+                } catch {}
+              }
+            }
+            break // success — leave the retry loop
+          } catch (fetchErr) {
+            if (fetchErr.noRetry || fetchErr.name !== 'AbortError') throw fetchErr
+            if (fetchErr.name === 'AbortError') {
+              throw new Error(content
+                ? 'The stream was cut off before completion. The partial response above is kept.'
+                : 'No response received in time (60s). The model may be overloaded — try again or pick another model.')
+            }
+          } finally {
+            clearTimeout(timeoutId)
+            currentCleanupRef.current = null
           }
         }
       } catch (fetchErr) {
-        clearTimeout(timeoutId)
-        if (fetchErr.name === 'AbortError') {
-          throw new Error(content
-            ? 'The stream was cut off before completion. The partial response above is kept.'
-            : 'No response received in time (60s). The model may be overloaded — try again or pick another model.')
+        if (fetchErr.name === 'AbortError' && content && !fetchErr.noRetry) {
+          // keep partial result; fall through to render below
+        } else {
+          throw fetchErr
         }
-        throw fetchErr
-      } finally {
-        clearTimeout(timeoutId)
       }
 
       setRawResponse(JSON.stringify({ model: responseModel, usage, content }, null, 2))
@@ -663,10 +716,26 @@ export default function App() {
 
         <div className="row">
           <div className="field">
+            <span>Upload ({uploadLabel})</span>
+            {files.length > 0 && (
+              <button
+                type="button"
+                className="clear-btn"
+                onClick={() => setFiles([])}
+                title="Remove all files"
+              >
+                Clear all ({files.length})
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="row">
+          <div className="field">
             <span>
-              {uploadAccept
-                ? `Upload (${uploadLabel})`
-                : 'Upload — selected model accepts text only'}
+              {finalAccept
+                ? `Add files (${uploadLabel})`
+                : 'Add files — selected model accepts text only'}
             </span>
             <div
               className={`dropzone ${dragActive ? 'drag-active' : ''}`}
@@ -682,7 +751,7 @@ export default function App() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept={uploadAccept || undefined}
+                accept={finalAccept || undefined}
                 multiple
                 hidden
                 onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }}
@@ -720,7 +789,19 @@ export default function App() {
         )}
 
         <label className="field">
-          <span id="prompt-label">Your prompt</span>
+          <span className="prompt-label-row">
+            <span id="prompt-label">Your prompt</span>
+            {prompt && (
+              <button
+                type="button"
+                className="clear-btn"
+                onClick={() => setPrompt('')}
+                title="Clear the prompt"
+              >
+                Clear
+              </button>
+            )}
+          </span>
           <textarea
             rows={4}
             value={prompt}

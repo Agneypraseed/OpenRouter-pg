@@ -98,6 +98,33 @@ body {
   letter-spacing: 0.01em;
 }
 
+.prompt-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.clear-btn {
+  border: none;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  align-self: flex-start;
+}
+
+.prompt-label-row .clear-btn { align-self: center; }
+
+.clear-btn:hover {
+  color: #ff3b30;
+  background: rgba(255, 59, 48, 0.1);
+}
+
 .row {
   display: flex;
   gap: 16px;
