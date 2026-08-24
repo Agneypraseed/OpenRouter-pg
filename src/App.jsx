@@ -205,16 +205,24 @@ export default function App() {
   const [result, setResult] = useState('')
   const [meta, setMeta] = useState(null)
   const [devMode, setDevMode] = useState(false)
+  const [chatMode, setChatMode] = useState(false)
   const [rawRequest, setRawRequest] = useState('')
   const [rawResponse, setRawResponse] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [streaming, setStreaming] = useState(false)
   const [phase, setPhase] = useState('')
   const [preview, setPreview] = useState(null) // { name, type, url }
+  const [chat, setChat] = useState([]) // [{ role: 'user'|'assistant', text, model?, usage? }]
   const [dragActive, setDragActive] = useState(false)
   const [thumbs, setThumbs] = useState({})
   const fileInputRef = useRef(null)
   const currentCleanupRef = useRef(null) // clears the in-flight request's timers on unmount
+  const threadEndRef = useRef(null)
+
+  // Keep the latest message in view as the conversation grows/streams.
+  useEffect(() => {
+    threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [chat, loading, phase])
 
   // Shared add pipeline: merge, dedupe, modality filter, 10-file cap.
   const MAX_FILES = 10
@@ -402,16 +410,28 @@ export default function App() {
     event.preventDefault()
     setError('')
     setResult('')
-    setMeta(null)
 
     if (!apiKey.trim()) return setError('Please enter your OpenRouter API key.')
     if (!prompt.trim() && files.length === 0) return setError('Add a prompt or at least one file.')
 
+    const userText = prompt
+    const turnFiles = files
+
+    // Show the user's message immediately and clear the composer.
+    setChat((prev) => [...prev, { role: 'user', text: userText, files: turnFiles.map((f) => f.name) }])
+    setPrompt('')
+    setFiles([])
+
     setLoading(true)
     setStreaming(false)
     try {
+      // Build the conversation for the API. Chat mode sends the full history;
+      // single mode sends only this turn (fresh context every time).
+      const historyForApi = chatMode
+        ? chat.map((m) => ({ role: m.role, content: m.text }))
+        : []
       const contentParts = await Promise.all(
-        files.map(async (file) => ({
+        turnFiles.map(async (file) => ({
           name: file.name,
           type: file.type,
           size: file.size,
@@ -419,8 +439,8 @@ export default function App() {
         })),
       )
 
-      // Browse any links in the prompt and pull their content in as context.
-      const urls = extractUrls(prompt)
+      // Browse any links in this turn's prompt and pull their content in as context.
+      const urls = extractUrls(userText)
       const pageContexts = []
       if (urls.length > 0) {
         setPhase(`Reading ${urls.length === 1 ? 'link' : `${urls.length} links`}…`)
@@ -443,17 +463,18 @@ export default function App() {
         setPhase('')
       }
 
-      const userText = pageContexts.length > 0
-        ? `${prompt}\n\n---\nReferenced page content:\n\n${pageContexts
+      const turnText = pageContexts.length > 0
+        ? `${userText}\n\n---\nReferenced page content:\n\n${pageContexts
             .map(({ url, markdown }) => `### ${url}\n\n${markdown}`)
             .join('\n\n---\n\n')}`
-        : prompt
+        : userText
 
       const requestBody = {
         model,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: buildContent(userText, contentParts) },
+          ...historyForApi,
+          { role: 'user', content: buildContent(turnText, contentParts) },
         ],
         ...(reasoningEffort !== 'none' && { reasoning_effort: reasoningEffort }),
       }
@@ -578,7 +599,7 @@ export default function App() {
       if (!content) {
         setError('The model returned an empty response. Try again or pick another model.')
       } else {
-        setResult(content)
+        setChat((prev) => [...prev, { role: 'assistant', text: content, model: responseModel ?? model, usage }])
       }
       setMeta({ model: responseModel ?? model, usage })
     } catch (err) {
@@ -590,6 +611,15 @@ export default function App() {
     } finally {
       setLoading(false)
     }
+  }
+
+  function clearChat() {
+    setChat([])
+    setResult('')
+    setMeta(null)
+    setRawRequest('')
+    setRawResponse('')
+    setError('')
   }
 
   function removeFile(index) {
@@ -834,14 +864,26 @@ export default function App() {
           {loading ? 'Analyzing…' : 'Analyze'}
         </button>
 
-        <button
-          type="button"
-          className={`dev-toggle ${devMode ? 'active' : ''}`}
-          onClick={() => setDevMode((v) => !v)}
-          aria-pressed={devMode}
-        >
-          {devMode ? '✓ Developer mode on' : 'Developer mode'}
-        </button>
+        <div className="mode-row" role="group" aria-label="Modes">
+          <button
+            type="button"
+            className={`mode-toggle ${chatMode ? 'active' : ''}`}
+            onClick={() => setChatMode((v) => !v)}
+            aria-pressed={chatMode}
+            title="Keep the conversation going — each message sees the full history"
+          >
+            {chatMode ? '✓ Chat mode on' : 'Chat mode'}
+          </button>
+          <button
+            type="button"
+            className={`dev-toggle-inline ${devMode ? 'active' : ''}`}
+            onClick={() => setDevMode((v) => !v)}
+            aria-pressed={devMode}
+            title="Inspect the raw request/response JSON"
+          >
+            {devMode ? '✓ Dev mode on' : 'Dev mode'}
+          </button>
+        </div>
       </form>
 
       {error && (
@@ -860,7 +902,75 @@ export default function App() {
         </div>
       )}
 
-      {(result || meta) && (
+      {chatMode && (chat.length > 0 || loading) && (
+        <section className="card result-card" aria-live="polite">
+          <div className="result-toolbar">
+            <p className="meta">Conversation · {chat.filter((m) => m.role === 'user').length} turn{chat.filter((m) => m.role === 'user').length === 1 ? '' : 's'}</p>
+            <div className="download-group" role="group" aria-label="Chat actions">
+              {result && (
+                <button type="button" className="dl-btn" onClick={() => downloadBlob(result, 'text/markdown;charset=utf-8', 'md')} title="Download the latest response as Markdown">
+                  Markdown
+                </button>
+              )}
+              {chat.length > 0 && !loading && (
+                <button type="button" className="dl-btn new-chat-btn" onClick={clearChat} title="Start a fresh conversation">
+                  ✚ New chat
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="chat-thread">
+            {chat.map((m, index) => (
+              m.role === 'user' ? (
+                <div key={index} className="bubble bubble-user">
+                  <div className="bubble-text">{m.text}</div>
+                  {m.files?.length > 0 && (
+                    <div className="bubble-files">📎 {m.files.join(', ')}</div>
+                  )}
+                </div>
+              ) : (
+                <div key={index} className="bubble bubble-assistant">
+                  <ResponseBlock markdown={m.text} />
+                  {m.usage?.total_tokens != null && (
+                    <div className="bubble-meta">{m.model} · {m.usage.total_tokens} tokens</div>
+                  )}
+                </div>
+              )
+            ))}
+            {loading && (
+              <div className="bubble bubble-assistant bubble-pending">
+                <span className="spinner" aria-hidden="true" />
+                <span className="bubble-text">{phase || 'Thinking…'}</span>
+              </div>
+            )}
+          </div>
+          <div ref={threadEndRef} />
+
+          {/* Inline composer: sits right below the latest reply, like a real chat app */}
+          <form
+            className="chat-composer"
+            onSubmit={(e) => { e.preventDefault(); handleSubmit(e) }}
+          >
+            <textarea
+              rows={2}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="Reply…"
+              aria-label="Reply to the conversation"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(e) }
+              }}
+            />
+            <button type="submit" className="chat-send" disabled={loading || (!prompt.trim() && files.length === 0)} aria-label="Send message">
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M2 10l16-7-5.5 15L9.5 12z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"/><path d="M9.5 12L18 3" stroke="currentColor" strokeWidth="1.6"/></svg>
+            </button>
+          </form>
+          <p className="composer-hint">Chat mode — the model sees the full conversation. Press Enter to send, Shift+Enter for a new line.</p>
+        </section>
+      )}
+
+      {!chatMode && (result || meta) && (
         <section className="card result-card" aria-live="polite">
           <div className="result-toolbar">
             {meta && (
@@ -871,18 +981,8 @@ export default function App() {
             )}
             {result && (
               <div className="download-group" role="group" aria-label="Download response">
-                <button type="button" className="dl-btn" onClick={() => downloadBlob(result, 'text/markdown;charset=utf-8', 'md')} title="Download as Markdown">
-                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 4v8h12V4z" fill="none" stroke="currentColor" strokeWidth="1.3"/><path d="M4.2 10V6.5L6 8.8l1.8-2.3V10M10 6.5V10m0 0l-1.4-1.4M10 10l1.4-1.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                  Markdown
-                </button>
-                <button type="button" className="dl-btn" onClick={() => downloadBlob(result.replace(/^#{1,6}\s*/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/[*_`]/g, ''), 'text/plain;charset=utf-8', 'txt')} title="Download as plain text">
-                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 2h5l3 3v9H4z" fill="none" stroke="currentColor" strokeWidth="1.3"/><path d="M6 8h4M6 10.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
-                  Text
-                </button>
-                <button type="button" className="dl-btn" onClick={downloadPdf} title="Export as PDF (via print dialog)">
-                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2v8m0 0L5.5 7.5M8 10l2.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><path d="M3 12.5h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
-                  PDF
-                </button>
+                <button type="button" className="dl-btn" onClick={() => downloadBlob(result, 'text/markdown;charset=utf-8', 'md')} title="Download as Markdown">Markdown</button>
+                <button type="button" className="dl-btn" onClick={downloadPdf} title="Export as PDF (via print dialog)">PDF</button>
               </div>
             )}
           </div>

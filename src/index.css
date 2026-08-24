@@ -458,6 +458,141 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
   margin-bottom: 16px;
 }
 
+/* Chat thread */
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.bubble {
+  max-width: 85%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+  border-bottom-right-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble-user .bubble-files {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.bubble-assistant {
+  align-self: flex-start;
+  background: rgba(0, 0, 0, 0.045);
+  border-bottom-left-radius: 6px;
+  width: 100%;
+  max-width: 100%;
+}
+
+.bubble-assistant .response { font-size: inherit; }
+
+.bubble-meta {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.bubble-pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: auto;
+  color: var(--text-secondary);
+}
+
+.new-chat-btn { color: var(--accent); border-color: rgba(0, 113, 227, 0.35); }
+
+/* Mode toggles (Chat / Dev) */
+.mode-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.mode-row > button {
+  flex: 1;
+  padding: 11px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-row > button:hover { border-color: var(--accent); color: var(--accent); }
+
+.mode-row > button.active {
+  background: rgba(0, 113, 227, 0.08);
+  border-color: rgba(0, 113, 227, 0.35);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Inline chat composer */
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+/* Scoped overrides for the global `textarea { width:100% }` and
+   `button[type=submit] { width:100% }` rules — inside the composer the
+   textarea flexes and the send button is a fixed square. */
+.chat-composer textarea {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  min-height: 44px;
+  max-height: 160px;
+}
+
+.chat-composer .chat-send {
+  width: 44px;
+  flex: 0 0 44px;
+  margin-top: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  border: none;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+
+.chat-composer .chat-send:hover:not(:disabled) { background: var(--accent-hover); }
+.chat-composer .chat-send:disabled { opacity: 0.4; cursor: default; }
+
+.composer-hint {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
 .download-group {
   display: flex;
   gap: 6px;
