@@ -150,15 +150,39 @@ function renderKatex(tex, displayMode, key) {
   return <span key={key} dangerouslySetInnerHTML={{ __html: html }} />
 }
 
-function ResponseBlock({ markdown }) {
+function ResponseBlock({ markdown, onRunHtml }) {
+  const containerRef = useRef(null)
   const html = useMemo(() => {
     if (!markdown) return ''
     const raw = marked.parse(markdown, { breaks: true, async: false })
     return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] })
   }, [markdown])
 
+  // Attach a "▶ Run" button to any code block that contains a full HTML document.
+  useEffect(() => {
+    const root = containerRef.current
+    if (!root) return
+    for (const pre of root.querySelectorAll('pre')) {
+      const code = pre.querySelector('code')
+      if (!code || pre.querySelector('.run-html-btn')) continue
+      const text = code.textContent ?? ''
+      const isHtmlDoc =
+        /language-(html|htm)\b/.test(code.className) ||
+        /^\s*(<!doctype html|<html[\s>])/i.test(text)
+      if (!isHtmlDoc) continue
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'run-html-btn'
+      btn.title = 'Run this HTML file in a live preview'
+      btn.textContent = '▶ Run'
+      btn.addEventListener('click', () => onRunHtml?.(text))
+      pre.appendChild(btn)
+    }
+  }, [html, onRunHtml])
+
   return (
     <div
+      ref={containerRef}
       className="response"
       dangerouslySetInnerHTML={{ __html: renderMathPostHtml(html) }}
     />
@@ -215,6 +239,7 @@ export default function App() {
   const [chat, setChat] = useState([]) // [{ role: 'user'|'assistant', text, model?, usage? }]
   const [dragActive, setDragActive] = useState(false)
   const [thumbs, setThumbs] = useState({})
+  const [runHtml, setRunHtml] = useState(null) // { name, code } — live HTML preview modal
   const fileInputRef = useRef(null)
   const currentCleanupRef = useRef(null) // clears the in-flight request's timers on unmount
   const threadEndRef = useRef(null)
@@ -417,10 +442,14 @@ export default function App() {
     const userText = prompt
     const turnFiles = files
 
-    // Show the user's message immediately and clear the composer.
+    // Show the user's message immediately. In chat mode clear the composer
+    // (the message lives in the thread); in single mode keep it so the user
+    // can tweak and re-run the same prompt.
     setChat((prev) => [...prev, { role: 'user', text: userText, files: turnFiles.map((f) => f.name) }])
-    setPrompt('')
-    setFiles([])
+    if (chatMode) {
+      setPrompt('')
+      setFiles([])
+    }
 
     setLoading(true)
     setStreaming(false)
@@ -931,7 +960,7 @@ export default function App() {
                 </div>
               ) : (
                 <div key={index} className="bubble bubble-assistant">
-                  <ResponseBlock markdown={m.text} />
+                  <ResponseBlock markdown={m.text} onRunHtml={(code) => setRunHtml({ code, name: `chat-turn-${index}.html` })} />
                   {m.usage?.total_tokens != null && (
                     <div className="bubble-meta">{m.model} · {m.usage.total_tokens} tokens</div>
                   )}
@@ -986,7 +1015,7 @@ export default function App() {
               </div>
             )}
           </div>
-          {result && <ResponseBlock markdown={result} />}
+          {result && <ResponseBlock markdown={result} onRunHtml={(code) => setRunHtml({ code, name: 'response.html' })} />}
         </section>
       )}
 
@@ -1014,6 +1043,41 @@ export default function App() {
             ) : (
               <iframe className="preview-frame" src={preview.url} title={preview.name} />
             )}
+          </div>
+        </div>
+      )}
+
+      {runHtml && (
+        <div className="preview-overlay" onClick={() => setRunHtml(null)} role="dialog" aria-modal="true" aria-label={`Live preview of ${runHtml.name}`}>
+          <div className="preview-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="preview-header">
+              <span className="preview-name" title={runHtml.name}>▶ {runHtml.name}</span>
+              <div className="preview-actions">
+                <button
+                  type="button"
+                  className="preview-newtab"
+                  title="Download this HTML file"
+                  onClick={() => {
+                    const blob = new Blob([runHtml.code], { type: 'text/html;charset=utf-8' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = runHtml.name
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  }}
+                >
+                  Download
+                </button>
+                <button type="button" className="preview-close" aria-label="Close preview" onClick={() => setRunHtml(null)}>✕</button>
+              </div>
+            </div>
+            <iframe
+              className="preview-frame"
+              title={runHtml.name}
+              sandbox="allow-scripts allow-forms allow-modals allow-popups"
+              srcDoc={runHtml.code}
+            />
           </div>
         </div>
       )}
