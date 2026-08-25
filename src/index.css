@@ -544,6 +544,30 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
   font-weight: 600;
 }
 
+/* Web search toggle shares the mode-row styling */
+.web-search-toggle {
+  flex: 1;
+  padding: 11px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.web-search-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+.web-search-toggle.active {
+  background: rgba(0, 113, 227, 0.08);
+  border-color: rgba(0, 113, 227, 0.35);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* Inline chat composer */
 .chat-composer {
   display: flex;
@@ -662,6 +686,36 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
   color: var(--text-secondary);
   text-align: center;
 }
+
+/* Collapsible "Sources read" box under a reply */
+.sources-box {
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+.sources-box summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-weight: 600;
+  user-select: none;
+}
+
+.sources-box summary:hover { color: var(--accent); }
+
+.sources-box ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sources-box a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.sources-box a:hover { text-decoration: underline; }
 
 .download-group {
   display: flex;

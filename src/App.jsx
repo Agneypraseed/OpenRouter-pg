@@ -17,6 +17,68 @@ const FREE_MODELS = [
 const SYSTEM_PROMPT =
   'You are a document/image analysis assistant. Respond in clean Markdown with these sections when relevant: ## Summary, ## Key Points (bullet list), ## Details, ## Answer. Be concise and factual.'
 
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return url
+  }
+}
+
+// Heuristic: does this question look like it needs fresh/current information?
+// Cheap keyword check — no API call. Deliberately broad; false positives just
+// cost one extra search.
+function needsFreshInfo(text) {
+  if (!text) return false
+  const t = text.toLowerCase()
+  const patterns = [
+    /\b(latest|newest|recent(ly)?|current(ly)?|today|tonight|yesterday|this (week|month|year|morning|afternoon)|last (week|month|night))\b/,
+    /\b(news|headlines?|breaking|trending|update[sd]?|announce[ds]?|release[ds]?|launch(ed|es)?|unveiled)\b/,
+    /\b(price|cost|stock|share price|weather|forecast|temperature|score|schedule|time in|population|who won|who is winning)\b/,
+    /\b20\d\d\b/, // explicit years — "what happened in 2026"
+    /\b(now|so far|as of)\b.*\??$/,
+    /\b(is|are|was|were|has|have|did)\b[^?.]{0,40}\b(still|yet|now|already)\b/,
+  ]
+  return patterns.some((re) => re.test(t))
+}
+
+// Web search (RAG). DuckDuckGo blocks direct browser calls (CORS + bot
+// detection), so we route the query through r.jina.ai — the same reader proxy
+// the app already uses for links, and it sends permissive CORS headers.
+// We parse the returned markdown for result links and unwrap DDG redirects.
+async function webSearch(query) {
+  const response = await fetch(
+    `https://r.jina.ai/https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`,
+    { signal: AbortSignal.timeout(30000) },
+  )
+  if (!response.ok) throw new Error(`Search failed (${response.status})`)
+  const markdown = await response.text()
+  if (/Unfortunately, bots use DuckDuckGo|challenge/i.test(markdown.slice(0, 500))) {
+    throw new Error('Search provider asked for a captcha — try again shortly.')
+  }
+  const results = []
+  const seen = new Set()
+  // Result lines look like: `1.[Title](https://duckduckgo.com/l/?uddg=<encoded>&rut=…)`
+  const linkRe = /\[([^\]]{4,120})\]\((https?:\/\/[^)\s]+)\)/g
+  for (const match of markdown.matchAll(linkRe)) {
+    let url = match[2]
+    try {
+      const parsed = new URL(url)
+      if (parsed.hostname.endsWith('duckduckgo.com') && parsed.pathname === '/l/') {
+        url = parsed.searchParams.get('uddg') ?? ''
+        if (!/^https?:\/\//.test(url)) continue
+      }
+      // Skip DDG's own house links.
+      if (new URL(url).hostname.endsWith('duckduckgo.com')) continue
+    } catch { continue }
+    if (seen.has(url)) continue
+    seen.add(url)
+    results.push({ title: match[1].replace(/\s+/g, ' ').trim(), url })
+    if (results.length >= 5) break
+  }
+  return results
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -269,6 +331,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false)
   const [thumbs, setThumbs] = useState({})
   const [runHtml, setRunHtml] = useState(null) // { name, code } — live HTML preview modal
+  const [webSearchOn, setWebSearchOn] = useState(false) // RAG: search the web for context
   const fileInputRef = useRef(null)
   const composerFileRef = useRef(null)
   const currentCleanupRef = useRef(null) // clears the in-flight request's timers on unmount
@@ -501,6 +564,28 @@ export default function App() {
       // Browse any links in this turn's prompt and pull their content in as context.
       const urls = extractUrls(userText)
       const pageContexts = []
+      const readSources = [] // successfully-read pages, shown under the reply
+
+      // Web search (RAG): auto-trigger when the question looks like it needs
+      // fresh info, or always when the toggle is on. In chat mode, the last
+      // few turns are included so follow-ups ("what about the second one?")
+      // still trigger correctly.
+      const searchProbe = chatMode && chat.length > 0
+        ? [...chat.slice(-4).map((m) => m.text), userText].join('\n')
+        : userText
+      const shouldSearch = webSearchOn || (userText.trim() && needsFreshInfo(searchProbe))
+      if (shouldSearch && userText.trim()) {
+        setPhase('Searching the web…')
+        try {
+          const hits = await webSearch(userText)
+          for (const hit of hits) {
+            if (!urls.includes(hit.url)) urls.push(hit.url)
+          }
+        } catch (err) {
+          console.warn('Web search failed:', err)
+        }
+      }
+
       if (urls.length > 0) {
         setPhase(`Reading ${urls.length === 1 ? 'link' : `${urls.length} links`}…`)
         const fetchController = new AbortController()
@@ -511,6 +596,7 @@ export default function App() {
             if (result.status === 'fulfilled') {
               // Cap each page so one huge site can't blow the context window.
               pageContexts.push({ url: urls[index], markdown: result.value.slice(0, 60000) })
+              readSources.push(urls[index])
             } else {
               const reason = result.reason?.name === 'AbortError' ? 'timed out' : result.reason?.message
               pageContexts.push({ url: urls[index], markdown: `Failed to fetch: ${reason}` })
@@ -658,9 +744,9 @@ export default function App() {
       if (!content) {
         setError('The model returned an empty response. Try again or pick another model.')
       } else {
-        setChat((prev) => [...prev, { role: 'assistant', text: content, model: responseModel ?? model, usage }])
+        setChat((prev) => [...prev, { role: 'assistant', text: content, model: responseModel ?? model, usage, sources: [...readSources] }])
       }
-      setMeta({ model: responseModel ?? model, usage })
+      setMeta({ model: responseModel ?? model, usage, sources: [...readSources] })
     } catch (err) {
       setError(
         /modality|image|pdf|file|unsupported|not support/i.test(err.message)
@@ -942,6 +1028,15 @@ export default function App() {
           >
             {devMode ? '✓ Dev mode on' : 'Dev mode'}
           </button>
+          <button
+            type="button"
+            className={`web-search-toggle ${webSearchOn ? 'active' : ''}`}
+            onClick={() => setWebSearchOn((v) => !v)}
+            aria-pressed={webSearchOn}
+            title="Search the web (DuckDuckGo) and feed the results to the model as context"
+          >
+            🌐 {webSearchOn ? 'Web search on' : 'Web search'}
+          </button>
         </div>
       </form>
 
@@ -991,6 +1086,18 @@ export default function App() {
               ) : (
                 <div key={index} className="bubble bubble-assistant">
                   <ResponseBlock markdown={m.text} onRunHtml={(code) => setRunHtml({ code, name: `chat-turn-${index}.html` })} />
+                  {m.sources?.length > 0 && (
+                    <details className="sources-box">
+                      <summary>📚 Sources read ({m.sources.length})</summary>
+                      <ul>
+                        {m.sources.map((url) => (
+                          <li key={url}>
+                            <a href={url} target="_blank" rel="noreferrer">{hostOf(url)}</a>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   {m.usage?.total_tokens != null && (
                     <div className="bubble-meta">{m.model} · {m.usage.total_tokens} tokens</div>
                   )}
@@ -1078,6 +1185,18 @@ export default function App() {
             )}
           </div>
           {result && <ResponseBlock markdown={result} onRunHtml={(code) => setRunHtml({ code, name: 'response.html' })} />}
+          {meta?.sources?.length > 0 && (
+            <details className="sources-box">
+              <summary>📚 Sources read ({meta.sources.length})</summary>
+              <ul>
+                {meta.sources.map((url) => (
+                  <li key={url}>
+                    <a href={url} target="_blank" rel="noreferrer">{hostOf(url)}</a>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </section>
       )}
 
