@@ -7,11 +7,12 @@ import 'katex/dist/katex.min.css'
 const DEFAULT_MODEL_ID = 'stealth/ox-alpha'
 
 const FREE_MODELS = [
-  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash', badge: 'Free' },
-  { id: 'meta-llama/llama-3.2-11b-vision-instruct:free', name: 'Llama 3.2 Vision 11B', badge: 'Free' },
-  { id: 'qwen/qwen-2.5-vl-72b-instruct:free', name: 'Qwen 2.5 VL 72B', badge: 'Free' },
-  { id: 'mistralai/mistral-small-3.1-24b-instruct:free', name: 'Mistral Small 3.1', badge: 'Free' },
-  { id: 'deepseek/deepseek-chat-v3-0324:free', name: 'DeepSeek V3 Chat', badge: 'Free' },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra', badge: 'Free', inputModalities: ['text'] },
+  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash', badge: 'Free', inputModalities: ['text', 'image', 'video', 'audio', 'file'] },
+  { id: 'meta-llama/llama-3.2-11b-vision-instruct:free', name: 'Llama 3.2 Vision 11B', badge: 'Free', inputModalities: ['text', 'image'] },
+  { id: 'qwen/qwen-2.5-vl-72b-instruct:free', name: 'Qwen 2.5 VL 72B', badge: 'Free', inputModalities: ['text', 'image', 'video'] },
+  { id: 'mistralai/mistral-small-3.1-24b-instruct:free', name: 'Mistral Small 3.1', badge: 'Free', inputModalities: ['text'] },
+  { id: 'deepseek/deepseek-chat-v3-0324:free', name: 'DeepSeek V3 Chat', badge: 'Free', inputModalities: ['text'] },
 ]
 
 const SYSTEM_PROMPT =
@@ -323,6 +324,7 @@ export default function App() {
   const [chatMode, setChatMode] = useState(false)
   const [rawRequest, setRawRequest] = useState('')
   const [rawResponse, setRawResponse] = useState('')
+  const [rawSearch, setRawSearch] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [streaming, setStreaming] = useState(false)
   const [phase, setPhase] = useState('')
@@ -345,11 +347,13 @@ export default function App() {
   // Shared add pipeline: merge, dedupe, modality filter, 10-file cap.
   const MAX_FILES = 10
   function addFiles(incoming) {
+    if (!incoming || incoming.length === 0) return
+    const currentMods = inputModsRef.current ?? ['text']
     setFiles((prev) => {
       const merged = [...prev]
       for (const f of incoming) {
         if (merged.length >= MAX_FILES) break
-        if (!fileMatchesModalities(f, inputModsRef.current)) continue
+        if (!fileMatchesModalities(f, currentMods)) continue
         if (!merged.some((x) => x.name === f.name && x.size === f.size)) merged.push(f)
       }
       return merged
@@ -429,7 +433,7 @@ export default function App() {
         @media print { .print-note { display: none; } }
         .print-note { margin-top: 28px; font-size: 12px; color: #6e6e73; }
       </style></head><body>
-      <div class="print-header">OpenRouter Analyzer${meta ? ` · ${meta.model}${meta.usage ? ` · ${meta.usage.total_tokens ?? '?'} tokens` : ''}` : ''} · ${new Date().toLocaleString()}</div>
+      <div class="print-header">OpenChat${meta ? ` · ${meta.model}${meta.usage ? ` · ${meta.usage.total_tokens ?? '?'} tokens` : ''}` : ''} · ${new Date().toLocaleString()}</div>
       ${source.innerHTML}
       <div class="print-note">Press Ctrl/Cmd+P and choose “Save as PDF”.</div>
       </body></html>`)
@@ -470,16 +474,26 @@ export default function App() {
       .catch(() => {})
   }, [])
 
-  // Modality info for the selected model (falls back to Ox Alpha's known profile).
+  // Modality info for the selected model (falls back to known free profile or Ox Alpha).
+  const freeModelInfo = FREE_MODELS.find((m) => m.id === model)
   const selectedModelInfo = allModels.find((m) => m.id === model)
-  const inputMods = selectedModelInfo?.inputModalities ?? ['text', 'image', 'video']
+  const modelName = selectedModelInfo?.name ?? freeModelInfo?.name ?? model
+  const inputMods = selectedModelInfo?.inputModalities ?? freeModelInfo?.inputModalities ?? (model === DEFAULT_MODEL_ID ? ['text', 'image', 'video'] : ['text'])
   const outputMods = selectedModelInfo?.outputModalities ?? ['text']
   const acceptsImage = inputMods.includes('image')
   const acceptsPdf = inputMods.includes('file') || inputMods.includes('pdf')
 
-  // Keep a ref of current modalities for use inside addFiles (defined above).
+  // Keep a ref of current modalities and model name for use inside addFiles (defined above).
   const inputModsRef = useRef(inputMods)
   useEffect(() => { inputModsRef.current = inputMods }, [inputMods])
+  const modelNameRef = useRef(modelName)
+  useEffect(() => { modelNameRef.current = modelName }, [modelName])
+
+  // When model changes, remove any files that are not supported by the new model.
+  useEffect(() => {
+    if (files.length === 0) return
+    setFiles((prev) => prev.filter((f) => fileMatchesModalities(f, inputMods)))
+  }, [model, inputMods])
 
   const MODALITY_ICONS = {
     text: (
@@ -528,6 +542,7 @@ export default function App() {
     event.preventDefault()
     setError('')
     setResult('')
+    setRawSearch('')
 
     if (!apiKey.trim()) return setError('Please enter your OpenRouter API key.')
     if (!prompt.trim() && files.length === 0) return setError('Add a prompt or at least one file.')
@@ -578,11 +593,13 @@ export default function App() {
         setPhase('Searching the web…')
         try {
           const hits = await webSearch(userText)
+          setRawSearch(JSON.stringify({ query: userText, results: hits }, null, 2))
           for (const hit of hits) {
             if (!urls.includes(hit.url)) urls.push(hit.url)
           }
         } catch (err) {
           console.warn('Web search failed:', err)
+          setRawSearch(JSON.stringify({ query: userText, error: err.message || String(err) }, null, 2))
         }
       }
 
@@ -764,6 +781,7 @@ export default function App() {
     setMeta(null)
     setRawRequest('')
     setRawResponse('')
+    setRawSearch('')
     setError('')
   }
 
@@ -774,8 +792,8 @@ export default function App() {
   return (
     <main className="page">
       <header className="page-header">
-        <h1>OpenRouter Analyzer</h1>
-        <p>Ask about PDFs and images, get structured answers.</p>
+        <h1>OpenChat</h1>
+        <p>Intelligent multi-model AI assistant with live search and document analysis.</p>
       </header>
 
       <form className="card" onSubmit={handleSubmit} noValidate>
@@ -891,37 +909,38 @@ export default function App() {
 
         <div className="row">
           <div className="field">
-            <span>Upload ({uploadLabel})</span>
-            {files.length > 0 && (
-              <button
-                type="button"
-                className="clear-btn"
-                onClick={() => setFiles([])}
-                title="Remove all files"
-              >
-                Clear all ({files.length})
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="row">
-          <div className="field">
-            <span>
-              {finalAccept
-                ? `Add files (${uploadLabel})`
-                : 'Add files — selected model accepts text only'}
+            <span className="prompt-label-row">
+              <span>Attachments</span>
+              {files.length > 0 && (
+                <button
+                  type="button"
+                  className="clear-btn"
+                  onClick={() => setFiles([])}
+                  title="Remove all files"
+                >
+                  Clear all ({files.length})
+                </button>
+              )}
             </span>
             <div
-              className={`dropzone ${dragActive ? 'drag-active' : ''}`}
+              className={`dropzone ${dragActive ? 'drag-active' : ''} ${!finalAccept ? 'dropzone-disabled' : ''}`}
               role="button"
-              tabIndex={0}
-              aria-label={`Add files by browsing, pasting, or dragging. Accepted: ${uploadLabel || 'none'}`}
-              onClick={() => fileInputRef.current?.click()}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click() } }}
-              onDragOver={(e) => { e.preventDefault(); setDragActive(true) }}
+              tabIndex={finalAccept ? 0 : -1}
+              aria-label={finalAccept ? `Add files by browsing, pasting, or dragging. Accepted: ${uploadLabel || 'none'}` : 'Attachments not supported by selected model'}
+              onClick={() => { if (finalAccept) fileInputRef.current?.click() }}
+              onKeyDown={(e) => {
+                if ((e.key === 'Enter' || e.key === ' ') && finalAccept) {
+                  e.preventDefault()
+                  fileInputRef.current?.click()
+                }
+              }}
+              onDragOver={(e) => { e.preventDefault(); if (finalAccept) setDragActive(true) }}
               onDragLeave={() => setDragActive(false)}
-              onDrop={(e) => { e.preventDefault(); setDragActive(false); addFiles(Array.from(e.dataTransfer.files ?? [])) }}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragActive(false)
+                if (finalAccept) addFiles(Array.from(e.dataTransfer.files ?? []))
+              }}
             >
               <input
                 ref={fileInputRef}
@@ -935,9 +954,15 @@ export default function App() {
                 <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
               </span>
               <span className="dropzone-text">
-                <strong>Click to browse</strong>, drag &amp; drop or paste
+                {finalAccept ? (
+                  <><strong>Click to browse</strong>, drag &amp; drop or paste</>
+                ) : (
+                  <><strong>Text-only model</strong> — switch model for attachments</>
+                )}
               </span>
-              <span className="dropzone-hint">{files.length}/10 files</span>
+              <span className="dropzone-hint">
+                {finalAccept ? `${files.length}/10 files${uploadLabel ? ` · ${uploadLabel}` : ''}` : 'Text only'}
+              </span>
             </div>
           </div>
         </div>
@@ -1114,6 +1139,11 @@ export default function App() {
           <div ref={threadEndRef} />
 
           {/* Inline composer: sits right below the latest reply, like a real chat app */}
+          {error && (
+            <div className="card error-card" role="alert" aria-live="assertive" style={{ margin: '12px 0 8px' }}>
+              {error}
+            </div>
+          )}
           <form
             className="chat-composer"
             onSubmit={(e) => { e.preventDefault(); handleSubmit(e) }}
@@ -1143,9 +1173,11 @@ export default function App() {
             <button
               type="button"
               className="chat-attach"
-              onClick={() => composerFileRef.current?.click()}
-              disabled={loading}
-              title={`Attach files${uploadLabel ? ` (${uploadLabel})` : ''}`}
+              onClick={() => {
+                if (finalAccept) composerFileRef.current?.click()
+              }}
+              disabled={loading || !finalAccept}
+              title={finalAccept ? `Attach files${uploadLabel ? ` (${uploadLabel})` : ''}` : 'Attachments not supported by this model'}
               aria-label="Attach files"
             >
               <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M14 5.5l-7.2 7.2a2.5 2.5 0 003.5 3.5l7.6-7.6a4 4 0 10-5.7-5.7L4.6 10.5a5.5 5.5 0 107.8 7.8l6.6-6.6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>
@@ -1202,6 +1234,12 @@ export default function App() {
 
       {devMode && (
         <section className="card dev-card" aria-label="Developer details">
+          {rawSearch && (
+            <>
+              <h3 className="dev-title">Web Search</h3>
+              <pre className="dev-json" tabIndex={0}>{rawSearch}</pre>
+            </>
+          )}
           <h3 className="dev-title">Request</h3>
           <pre className="dev-json" tabIndex={0}>{rawRequest || '— press Analyze to capture a request —'}</pre>
           <h3 className="dev-title">Response</h3>

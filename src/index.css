@@ -267,6 +267,23 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
   background: rgba(0, 113, 227, 0.05);
 }
 
+.dropzone.dropzone-disabled {
+  opacity: 0.75;
+  background: rgba(0, 0, 0, 0.02);
+  border-style: dotted;
+}
+
+.dropzone.dropzone-disabled:hover,
+.dropzone.dropzone-disabled:focus-visible {
+  border-color: rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.dropzone.dropzone-disabled .dropzone-plus {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-secondary);
+}
+
 .dropzone.drag-active { border-style: solid; }
 
 .dropzone-plus {
@@ -630,8 +647,12 @@ button[type="submit"]:disabled { opacity: 0.45; cursor: wait; }
 .chat-attach:disabled { opacity: 0.4; cursor: default; }
 
 /* Attached-file chips inside the chat composer */
+.chat-composer {
+  flex-wrap: wrap;
+}
+
 .composer-files {
-  flex-basis: 100%;
+  flex: 1 1 100%;
   flex-direction: row;
   flex-wrap: wrap;
   margin: 0 0 4px;
