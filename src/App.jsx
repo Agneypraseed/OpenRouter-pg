@@ -6,13 +6,12 @@ import 'katex/dist/katex.min.css'
 
 const DEFAULT_MODEL_ID = 'stealth/ox-alpha'
 
-const FREE_MODELS = [
-  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra', badge: 'Free', inputModalities: ['text'] },
-  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash', badge: 'Free', inputModalities: ['text', 'image', 'video', 'audio', 'file'] },
-  { id: 'meta-llama/llama-3.2-11b-vision-instruct:free', name: 'Llama 3.2 Vision 11B', badge: 'Free', inputModalities: ['text', 'image'] },
-  { id: 'qwen/qwen-2.5-vl-72b-instruct:free', name: 'Qwen 2.5 VL 72B', badge: 'Free', inputModalities: ['text', 'image', 'video'] },
-  { id: 'mistralai/mistral-small-3.1-24b-instruct:free', name: 'Mistral Small 3.1', badge: 'Free', inputModalities: ['text'] },
-  { id: 'deepseek/deepseek-chat-v3-0324:free', name: 'DeepSeek V3 Chat', badge: 'Free', inputModalities: ['text'] },
+const INITIAL_FREE_MODELS = [
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'NVIDIA: Nemotron 3 Ultra', badge: 'Free', isFree: true, inputModalities: ['text'] },
+  { id: 'nvidia/nemotron-3.5-lightning:free', name: 'NVIDIA: Nemotron 3.5 Lightning', badge: 'Free', isFree: true, inputModalities: ['text'] },
+  { id: 'liquid/lfm-2.5-2.6b:free', name: 'LiquidAI: LFM2.5-2.6B', badge: 'Free', isFree: true, inputModalities: ['text'] },
+  { id: 'google/gemma-4-31b-it:free', name: 'Google: Gemma 4 31B', badge: 'Free', isFree: true, inputModalities: ['text'] },
+  { id: 'openrouter/free', name: 'Free Models Router', badge: 'Free', isFree: true, inputModalities: ['text'] },
 ]
 
 const SYSTEM_PROMPT =
@@ -242,6 +241,19 @@ function withStorageShim(code) {
   return shim + code
 }
 
+function cleanMarkdownForSpeech(text) {
+  if (!text) return ''
+  return text
+    .replace(/```[\s\S]*?```/g, 'Code block omitted.')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[.*?\]\(.*?\)/g, '')
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/^[#*>\-\d.]+\s+/gm, '')
+    .replace(/[*_~`]/g, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .trim()
+}
+
 function ResponseBlock({ markdown, onRunHtml }) {
   const containerRef = useRef(null)
   const html = useMemo(() => {
@@ -313,6 +325,8 @@ export default function App() {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [reasoningEffort, setReasoningEffort] = useState('medium')
   const [allModels, setAllModels] = useState([])
+  const [modelSearch, setModelSearch] = useState('')
+  const searchInputRef = useRef(null)
   const [model, setModel] = useState('stealth/ox-alpha')
   const [prompt, setPrompt] = useState('')
   const [files, setFiles] = useState([])
@@ -334,6 +348,9 @@ export default function App() {
   const [thumbs, setThumbs] = useState({})
   const [runHtml, setRunHtml] = useState(null) // { name, code } — live HTML preview modal
   const [webSearchOn, setWebSearchOn] = useState(false) // RAG: search the web for context
+  const [voice, setVoice] = useState('alloy') // TTS voice choice (alloy, echo, fable, onyx, nova, shimmer)
+  const [speakingId, setSpeakingId] = useState(null) // ID of message currently being spoken aloud
+  const audioPlayerRef = useRef(null)
   const fileInputRef = useRef(null)
   const composerFileRef = useRef(null)
   const currentCleanupRef = useRef(null) // clears the in-flight request's timers on unmount
@@ -403,6 +420,54 @@ export default function App() {
     setPreview(null)
   }
 
+  function stopSpeaking() {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel()
+    }
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause()
+      audioPlayerRef.current.currentTime = 0
+    }
+    setSpeakingId(null)
+  }
+
+  function toggleSpeak(id, text, audioUrl) {
+    if (speakingId === id) {
+      stopSpeaking()
+      return
+    }
+    stopSpeaking()
+    if (audioUrl) {
+      const audio = new Audio(audioUrl)
+      audioPlayerRef.current = audio
+      setSpeakingId(id)
+      audio.onended = () => setSpeakingId(null)
+      audio.onerror = () => setSpeakingId(null)
+      audio.play().catch(() => setSpeakingId(null))
+      return
+    }
+    if (!('speechSynthesis' in window)) {
+      setError('Text-to-speech is not supported in this browser.')
+      return
+    }
+    const plainText = cleanMarkdownForSpeech(text)
+    if (!plainText) return
+    const utterance = new SpeechSynthesisUtterance(plainText)
+    utterance.rate = 1.0
+    utterance.pitch = 1.0
+    utterance.onend = () => setSpeakingId(null)
+    utterance.onerror = () => setSpeakingId(null)
+    setSpeakingId(id)
+    window.speechSynthesis.speak(utterance)
+  }
+
+  useEffect(() => {
+    return () => {
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel()
+      if (audioPlayerRef.current) audioPlayerRef.current.pause()
+    }
+  }, [])
+
   // Trigger a client-side download of a text blob.
   function downloadBlob(content, mime, extension) {
     const blob = new Blob([content], { type: mime })
@@ -462,26 +527,53 @@ export default function App() {
       .then((data) => {
         if (!Array.isArray(data?.data)) return
         const models = data.data
-          .map((m) => ({
-            id: m.id,
-            name: m.name ?? m.id,
-            inputModalities: m.architecture?.input_modalities ?? ['text'],
-            outputModalities: m.architecture?.output_modalities ?? ['text'],
-          }))
+          .map((m) => {
+            const isFree = m.id.endsWith(':free') || (m.pricing && Number(m.pricing.prompt) === 0 && Number(m.pricing.completion) === 0)
+            return {
+              id: m.id,
+              name: m.name ?? m.id,
+              isFree: Boolean(isFree),
+              contextLength: m.context_length,
+              inputModalities: m.architecture?.input_modalities ?? ['text'],
+              outputModalities: m.architecture?.output_modalities ?? ['text'],
+            }
+          })
           .sort((a, b) => a.name.localeCompare(b.name))
         if (models.length > 0) setAllModels(models)
       })
       .catch(() => {})
   }, [])
 
-  // Modality info for the selected model (falls back to known free profile or Ox Alpha).
-  const freeModelInfo = FREE_MODELS.find((m) => m.id === model)
+  // Live top 5 free models directly from OpenRouter API
+  const liveFreeModels = useMemo(() => {
+    return allModels.filter((m) => m.isFree).slice(0, 5)
+  }, [allModels])
+
+  const displayFreeModels = liveFreeModels.length > 0 ? liveFreeModels : INITIAL_FREE_MODELS
+
+  const filteredModels = useMemo(() => {
+    const q = modelSearch.trim().toLowerCase()
+    if (!q) return []
+    return allModels.filter((m) => m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+  }, [allModels, modelSearch])
+
+  useEffect(() => {
+    if (dropdownOpen) {
+      setTimeout(() => searchInputRef.current?.focus(), 50)
+    } else {
+      setModelSearch('')
+    }
+  }, [dropdownOpen])
+
+  // Modality info for the selected model (falls back to live free profile or Ox Alpha).
+  const freeModelInfo = displayFreeModels.find((m) => m.id === model)
   const selectedModelInfo = allModels.find((m) => m.id === model)
   const modelName = selectedModelInfo?.name ?? freeModelInfo?.name ?? model
   const inputMods = selectedModelInfo?.inputModalities ?? freeModelInfo?.inputModalities ?? (model === DEFAULT_MODEL_ID ? ['text', 'image', 'video'] : ['text'])
   const outputMods = selectedModelInfo?.outputModalities ?? ['text']
   const acceptsImage = inputMods.includes('image')
   const acceptsPdf = inputMods.includes('file') || inputMods.includes('pdf')
+  const producesAudio = outputMods.includes('audio')
 
   // Keep a ref of current modalities and model name for use inside addFiles (defined above).
   const inputModsRef = useRef(inputMods)
@@ -631,6 +723,8 @@ export default function App() {
             .join('\n\n---\n\n')}`
         : userText
 
+      const producesAudio = outputMods.includes('audio')
+
       const requestBody = {
         model,
         messages: [
@@ -639,6 +733,10 @@ export default function App() {
           { role: 'user', content: buildContent(turnText, contentParts) },
         ],
         ...(reasoningEffort !== 'none' && { reasoning_effort: reasoningEffort }),
+        ...(producesAudio && {
+          modalities: ['text', 'audio'],
+          audio: { voice, format: 'wav' },
+        }),
       }
       setRawRequest(JSON.stringify(requestBody, null, 2))
 
@@ -646,6 +744,7 @@ export default function App() {
       const totalTimeoutMs = 300000
 
       let content = ''
+      let audioBase64 = ''
       let usage = null
       let responseModel = null
       try {
@@ -712,6 +811,14 @@ export default function App() {
                     content += delta
                     setResult(content)
                   }
+                  const audioDelta = chunk.choices?.[0]?.delta?.audio
+                  if (audioDelta?.data) {
+                    audioBase64 += audioDelta.data
+                  }
+                  if (audioDelta?.transcript && !delta) {
+                    content += audioDelta.transcript
+                    setResult(content)
+                  }
                   // Mid-stream provider errors arrive as SSE events too.
                   if (chunk.error) {
                     const msg = parseProviderError(chunk.error.code ?? 500, JSON.stringify({ error: chunk.error }))
@@ -730,6 +837,12 @@ export default function App() {
                 try {
                   const data = JSON.parse(text)
                   content = data.choices?.[0]?.message?.content ?? ''
+                  if (data.choices?.[0]?.message?.audio?.data) {
+                    audioBase64 = data.choices[0].message.audio.data
+                  }
+                  if (data.choices?.[0]?.message?.audio?.transcript && !content) {
+                    content = data.choices[0].message.audio.transcript
+                  }
                   usage = data.usage ?? null
                   responseModel = data.model ?? null
                 } catch {}
@@ -756,14 +869,26 @@ export default function App() {
         }
       }
 
-      setRawResponse(JSON.stringify({ model: responseModel, usage, content }, null, 2))
+      const audioUrl = audioBase64 ? `data:audio/wav;base64,${audioBase64}` : null
 
-      if (!content) {
+      setRawResponse(JSON.stringify({ model: responseModel, usage, content, hasAudio: Boolean(audioUrl) }, null, 2))
+
+      if (!content && !audioUrl) {
         setError('The model returned an empty response. Try again or pick another model.')
       } else {
-        setChat((prev) => [...prev, { role: 'assistant', text: content, model: responseModel ?? model, usage, sources: [...readSources] }])
+        setChat((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: content,
+            audio: audioUrl,
+            model: responseModel ?? model,
+            usage,
+            sources: [...readSources],
+          },
+        ])
       }
-      setMeta({ model: responseModel ?? model, usage, sources: [...readSources] })
+      setMeta({ model: responseModel ?? model, usage, sources: [...readSources], audio: audioUrl })
     } catch (err) {
       setError(
         /modality|image|pdf|file|unsupported|not support/i.test(err.message)
@@ -776,6 +901,7 @@ export default function App() {
   }
 
   function clearChat() {
+    stopSpeaking()
     setChat([])
     setResult('')
     setMeta(null)
@@ -830,53 +956,136 @@ export default function App() {
                 aria-expanded={dropdownOpen}
                 aria-labelledby="model-label"
               >
-                <span>{allModels.find((m) => m.id === model)?.name ?? FREE_MODELS.find((m) => m.id === model)?.name ?? model}</span>
+                <span>{allModels.find((m) => m.id === model)?.name ?? displayFreeModels.find((m) => m.id === model)?.name ?? model}</span>
                 <svg aria-hidden="true" width="12" height="8" viewBox="0 0 12 8"><path d="M1 1l5 5 5-5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
               </button>
 
               {dropdownOpen && (
-                <div className="model-menu" role="listbox" aria-label="Models">
-                  <div
-                    role="option"
-                    aria-selected={model === DEFAULT_MODEL_ID}
-                    tabIndex={0}
-                    className={`model-option ${model === DEFAULT_MODEL_ID ? 'selected' : ''}`}
-                    onClick={() => { setModel(DEFAULT_MODEL_ID); setDropdownOpen(false) }}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(DEFAULT_MODEL_ID); setDropdownOpen(false) } }}
-                  >
-                    <span>Ox Alpha</span><em className="badge">Default</em>
+                <div
+                  className="model-menu"
+                  role="listbox"
+                  aria-label="Models"
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <div className="model-search-box">
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" className="search-icon">
+                      <path d="M11.5 7a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" />
+                    </svg>
+                    <input
+                      ref={searchInputRef}
+                      type="text"
+                      className="model-search-input"
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      placeholder="Search models by name or ID…"
+                      aria-label="Search models"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation()
+                          setDropdownOpen(false)
+                        }
+                      }}
+                    />
+                    {modelSearch && (
+                      <button
+                        type="button"
+                        className="model-search-clear"
+                        onClick={() => setModelSearch('')}
+                        aria-label="Clear search"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </div>
-                  {FREE_MODELS.map((m) => (
-                    <div
-                      key={m.id}
-                      role="option"
-                      aria-selected={model === m.id}
-                      tabIndex={0}
-                      className={`model-option ${model === m.id ? 'selected' : ''}`}
-                      onClick={() => { setModel(m.id); setDropdownOpen(false) }}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(m.id); setDropdownOpen(false) } }}
-                    >
-                      <span>{m.name}</span><em className="badge free">{m.badge}</em>
-                    </div>
-                  ))}
 
-                  <div className="see-more-wrap">
-                    <div className="see-more-label">See more ({allModels.length})</div>
-                    <div className="see-more-panel">
-                      {allModels.map((m) => (
-                        <div
-                          key={m.id}
-                          role="option"
-                          aria-selected={model === m.id}
-                          tabIndex={0}
-                          className={`model-option ${model === m.id ? 'selected' : ''}`}
-                          onClick={() => { setModel(m.id); setDropdownOpen(false) }}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(m.id); setDropdownOpen(false) } }}
-                        >
-                          <span>{m.name}</span>
+                  <div className="model-menu-scroll">
+                    {modelSearch.trim() ? (
+                      filteredModels.length > 0 ? (
+                        <div className="model-group">
+                          <div className="model-group-title">Matching models ({filteredModels.length})</div>
+                          {filteredModels.map((m) => (
+                            <div
+                              key={m.id}
+                              role="option"
+                              aria-selected={model === m.id}
+                              tabIndex={0}
+                              className={`model-option ${model === m.id ? 'selected' : ''}`}
+                              onClick={() => { setModel(m.id); setDropdownOpen(false) }}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(m.id); setDropdownOpen(false) } }}
+                            >
+                              <div className="model-option-text">
+                                <span className="model-option-name">{m.name}</span>
+                                <span className="model-option-id">{m.id}</span>
+                              </div>
+                              {m.isFree && <em className="badge free">Free</em>}
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                      ) : (
+                        <div className="model-empty">No models found matching “{modelSearch}”</div>
+                      )
+                    ) : (
+                      <>
+                        <div
+                          role="option"
+                          aria-selected={model === DEFAULT_MODEL_ID}
+                          tabIndex={0}
+                          className={`model-option ${model === DEFAULT_MODEL_ID ? 'selected' : ''}`}
+                          onClick={() => { setModel(DEFAULT_MODEL_ID); setDropdownOpen(false) }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(DEFAULT_MODEL_ID); setDropdownOpen(false) } }}
+                        >
+                          <div className="model-option-text">
+                            <span className="model-option-name">Ox Alpha</span>
+                            <span className="model-option-id">{DEFAULT_MODEL_ID}</span>
+                          </div>
+                          <em className="badge">Default</em>
+                        </div>
+
+                        <div className="model-group">
+                          <div className="model-group-title">Top Free Models (Live)</div>
+                          {displayFreeModels.map((m) => (
+                            <div
+                              key={m.id}
+                              role="option"
+                              aria-selected={model === m.id}
+                              tabIndex={0}
+                              className={`model-option ${model === m.id ? 'selected' : ''}`}
+                              onClick={() => { setModel(m.id); setDropdownOpen(false) }}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(m.id); setDropdownOpen(false) } }}
+                            >
+                              <div className="model-option-text">
+                                <span className="model-option-name">{m.name.replace(/\s*\(free\)\s*/i, '').trim()}</span>
+                                <span className="model-option-id">{m.id}</span>
+                              </div>
+                              <em className="badge free">Free</em>
+                            </div>
+                          ))}
+                        </div>
+
+                        {allModels.length > 0 && (
+                          <div className="model-group">
+                            <div className="model-group-title">All Models ({allModels.length})</div>
+                            {allModels.map((m) => (
+                              <div
+                                key={m.id}
+                                role="option"
+                                aria-selected={model === m.id}
+                                tabIndex={0}
+                                className={`model-option ${model === m.id ? 'selected' : ''}`}
+                                onClick={() => { setModel(m.id); setDropdownOpen(false) }}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModel(m.id); setDropdownOpen(false) } }}
+                              >
+                                <div className="model-option-text">
+                                  <span className="model-option-name">{m.name}</span>
+                                  <span className="model-option-id">{m.id}</span>
+                                </div>
+                                {m.isFree && <em className="badge free">Free</em>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
               )}
@@ -1028,6 +1237,24 @@ export default function App() {
               <option value="max">Max</option>
             </select>
           </label>
+
+          {producesAudio && (
+            <label className="field">
+              <span>Voice</span>
+              <select
+                className="model-select"
+                value={voice}
+                onChange={(e) => setVoice(e.target.value)}
+              >
+                <option value="alloy">Alloy (Neutral)</option>
+                <option value="echo">Echo (Warm)</option>
+                <option value="fable">Fable (British)</option>
+                <option value="onyx">Onyx (Deep)</option>
+                <option value="nova">Nova (Energetic)</option>
+                <option value="shimmer">Shimmer (Clear)</option>
+              </select>
+            </label>
+          )}
         </div>
 
         <button type="submit" disabled={loading} aria-busy={loading}>
@@ -1110,6 +1337,11 @@ export default function App() {
                 </div>
               ) : (
                 <div key={index} className="bubble bubble-assistant">
+                  {m.audio && (
+                    <div className="audio-player-wrapper">
+                      <audio controls src={m.audio} className="response-audio-player" />
+                    </div>
+                  )}
                   <ResponseBlock markdown={m.text} onRunHtml={(code) => setRunHtml({ code, name: `chat-turn-${index}.html` })} />
                   {m.sources?.length > 0 && (
                     <details className="sources-box">
@@ -1123,9 +1355,20 @@ export default function App() {
                       </ul>
                     </details>
                   )}
-                  {m.usage?.total_tokens != null && (
-                    <div className="bubble-meta">{m.model} · {m.usage.total_tokens} tokens</div>
-                  )}
+                  <div className="bubble-footer">
+                    {m.usage?.total_tokens != null && (
+                      <span className="bubble-meta">{m.model} · {m.usage.total_tokens} tokens</span>
+                    )}
+                    <button
+                      type="button"
+                      className={`bubble-speak-btn ${speakingId === `chat-${index}` ? 'active-speaking' : ''}`}
+                      onClick={() => toggleSpeak(`chat-${index}`, m.text, m.audio)}
+                      title={speakingId === `chat-${index}` ? 'Stop listening' : 'Read aloud'}
+                      aria-label={speakingId === `chat-${index}` ? 'Stop listening' : 'Read aloud'}
+                    >
+                      {speakingId === `chat-${index}` ? '⏹ Stop' : '🔊 Listen'}
+                    </button>
+                  </div>
                 </div>
               )
             ))}
@@ -1210,12 +1453,25 @@ export default function App() {
               </p>
             )}
             {result && (
-              <div className="download-group" role="group" aria-label="Download response">
+              <div className="download-group" role="group" aria-label="Response actions">
+                <button
+                  type="button"
+                  className={`dl-btn speak-btn ${speakingId === 'single' ? 'active-speaking' : ''}`}
+                  onClick={() => toggleSpeak('single', result, meta?.audio)}
+                  title={speakingId === 'single' ? 'Stop listening' : 'Read aloud (TTS)'}
+                >
+                  {speakingId === 'single' ? '⏹ Stop' : '🔊 Listen'}
+                </button>
                 <button type="button" className="dl-btn" onClick={() => downloadBlob(result, 'text/markdown;charset=utf-8', 'md')} title="Download as Markdown">Markdown</button>
                 <button type="button" className="dl-btn" onClick={downloadPdf} title="Export as PDF (via print dialog)">PDF</button>
               </div>
             )}
           </div>
+          {meta?.audio && (
+            <div className="audio-player-wrapper" style={{ marginBottom: 16 }}>
+              <audio controls src={meta.audio} className="response-audio-player" />
+            </div>
+          )}
           {result && <ResponseBlock markdown={result} onRunHtml={(code) => setRunHtml({ code, name: 'response.html' })} />}
           {meta?.sources?.length > 0 && (
             <details className="sources-box">
